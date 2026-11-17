@@ -7,3 +7,4 @@ dist/
 .cxx/
 .externalNativeBuild/
 __pycache__/
+app/src/main/jniLibs/arm64-v8a/libbirch.so

@@ -12,6 +12,7 @@ import zipfile
 ROOT=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser()
 parser.add_argument('apk', nargs='?', type=Path, default=ROOT/'app/build/outputs/apk/debug/app-debug.apk')
+parser.add_argument('--baseline', type=Path, help='Compare upgrade identity, permissions and retained resources to a signed reference APK')
 parser.add_argument('--image', type=Path, help='Optional known Debian 13.7 gzip fixture (not packaged)')
 parser.add_argument('--run-guest', action='store_true', help='Requires a host without Android app seccomp restrictions')
 args=parser.parse_args()
@@ -37,6 +38,30 @@ with zipfile.ZipFile(APK) as apk:
     assert b'app.birch.shell' not in native
     for f in ['xterm.js','xterm.css','fit.js','screen.js','index.html','LICENSE.xterm','LICENSE.fit']:
         assert apk.read('assets/term/'+f)==(ROOT/'app/src/main/assets/term'/f).read_bytes()
+    if args.baseline:
+        with zipfile.ZipFile(args.baseline) as baseline:
+            def preserved_files(archive):
+                return {n for n in archive.namelist() if n.startswith(('assets/term/', 'lib/')) or n == 'res/drawable/birch_mark.xml'}
+
+            files = preserved_files(baseline)
+            assert files == preserved_files(apk), 'terminal assets, logo or runtime file set changed'
+            for name in files:
+                assert apk.read(name) == baseline.read(name), name
+
+        def permissions(badging):
+            return {line for line in badging.splitlines() if line.startswith('uses-permission')}
+
+        def signers(path):
+            result = subprocess.check_output(['apksigner', 'verify', '--print-certs', str(path)], text=True)
+            digests = {line.split('digest: ')[1] for line in result.splitlines() if 'certificate SHA-256 digest: ' in line}
+            assert digests, 'no verified signing certificate'
+            return digests
+
+        original = subprocess.check_output(['aapt2', 'dump', 'badging', str(args.baseline)], text=True)
+        assert "package: name='app.birch.debian'" in original
+        assert permissions(original) == permissions(badging), 'requested permissions changed'
+        assert signers(args.baseline) == signers(APK), 'signing certificate changed'
+        print('Reference APK: signing certificate, package name, permissions, logo, terminal assets and native runtime match')
 print('APK integrity, runtime files, three setup steps and offline terminal: PASS')
 if not args.image: raise SystemExit(0)
 data=args.image.read_bytes()

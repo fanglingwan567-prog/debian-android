@@ -2,20 +2,22 @@
 
 ARM64 已 root 安卓手机的本地 Debian 命令行。Android 9+，需要可用的 `su`、Android Toybox 和较新的系统 WebView。无遥测、无远程网页；系统镜像在首次安装时按需联网下载，装好后启动终端无需联网。此构建不包含非 root VM 后端。
 
+本项目从 `0.1.27` 独立重写；范围和验收见[重写计划](REWRITE.md)，编码遵循[项目规范](AGENTS.md)。
+
 ## 在 Android Studio 中打开
 
-选择 **File → Open**，打开含 `settings.gradle` 和 `gradlew` 的项目根目录，**不要只打开 `app/`**。Gradle 分发选择项目的 Wrapper（8.8），使用 JDK 17 或 21，配置 Android SDK 34；同步后选择 `app` 运行配置。首次在新电脑上同步需要下载 Gradle 和 Maven 依赖，但构建 APK 不需要 Debian 镜像。运行终端仍需要已 root 的 ARM64 Android 设备。
+选择 **File → Open**，打开含 `settings.gradle` 和 `gradlew` 的项目根目录，**不要只打开 `app/`**。Gradle 分发选择项目的 Wrapper（8.8），使用 JDK 17 或 21，配置 Android SDK 34，并先按下文从源码生成 ARM64 启动器；同步后选择 `app` 运行配置。首次在新电脑上同步需要下载 Gradle 和 Maven 依赖，但构建 APK 不需要 Debian 镜像。运行终端仍需要已 root 的 ARM64 Android 设备。
 
 ```text
 settings.gradle               根项目 Debian，包含 :app
 build.gradle                  Android Gradle 插件版本
 app/build.gradle              Android 配置和依赖
 app/src/main/AndroidManifest.xml
-app/src/main/java/            Java 源码
+app/src/main/java/            Kotlin 源码：Compose 界面、镜像与存储、root 调用、终端宿主与会话
 app/src/main/res/             Android 资源
 app/src/main/assets/          离线终端（不含系统镜像）
 app/src/main/cpp/             原生启动器 C 源码
-app/src/main/jniLibs/         已编译的 ARM64 启动器
+app/src/main/jniLibs/         本地生成的 ARM64 启动器（不入库）
 gradle/wrapper/               Gradle Wrapper 配置和 JAR
 gradlew / gradlew.bat          Linux、macOS / Windows 构建入口
 tools/                        Termux 构建及资产准备脚本
@@ -42,24 +44,40 @@ tests/                        主机端回归测试、可选设备测试
 ## 工具与构建
 
 - 镜像：Docker Official Images 的 `library/debian`，不在安装包中锁死版本号或摘要。每次选择分支重新获取目录；一次下载锁定所选清单摘要及其层摘要，不跟随可变标签。网络请求仅在普通应用进程发出，WebView 保持离线。
-- Material Components Android **1.12.0**（当前本机缓存版本，不是最新的 1.14.0），真实 `Theme.Material3.DayNight`、系统动态配色、原生按钮/卡片/对话框。终端采用 xterm.js **6.0.0**、addon-fit **0.11.0**；上游许可证在 assets/term 中。`tools/assets.py` 在校验上游包后应用一处本地修正：清除选区时也更新 DOM 渲染器缓存，避免终端高度改变时重画已经取消的选区。Debian 软件版权信息保留在镜像 `/usr/share/doc` 中。
+- 安装引导使用 Kotlin **1.9.24**、Compose 编译器 **1.5.14**、Compose BOM **2024.06.00**（UI **1.6.8**、Material 3 **1.2.1**）。颜色取自原 `Theme.Material3.DayNight`，波浪进度使用 Compose Canvas，终端快捷键和确认框使用 Compose。Material Components **1.12.0** 提供 Activity 主题和系统动态配色。终端采用 xterm.js **6.0.0**、addon-fit **0.11.0**；上游许可证在 assets/term 中。`tools/assets.py` 在校验上游包后应用一处本地修正：清除选区时也更新 DOM 渲染器缓存，避免终端高度改变时重画已经取消的选区。Debian 软件版权信息保留在镜像 `/usr/share/doc` 中。
 - 本次工具链：SDK 34、AGP 8.4.1、Gradle 8.8、JDK 21、NDK r29 sysroot。输出使用本地 Android debug key，仅供测试，不是商店发行包。
 - `tools/assets.py` 只在重新获取打包输入时需要联网，只下载固定摘要的 xterm 包。源码和所需资产已就位。
 
-桌面命令行构建（Windows 用 `gradlew.bat`）：
+仓库不提交 APK、Debian 镜像或编译好的 `libbirch.so`。首次克隆或修改 `launcher.c` 后，先从项目根目录运行：
+
+```sh
+sh tools/native.sh
+```
+
+此步骤需要 NDK r29 的 sysroot，以及可在本机运行的 `clang`、`ld.lld`。Termux 使用本机的 LLVM 工具，脚本默认查找 `~/android-ndk-r29`。Linux/macOS 可将 `ANDROID_NDK_HOME` 指向 NDK 根目录，并将其中 `toolchains/llvm/prebuilt/<宿主目录>/bin` 加到 `PATH`；Windows 可在 WSL 使用 Linux 版 NDK 执行此步骤。
+
+生成启动器后可使用 Android Studio，或从命令行构建（Windows 用 `gradlew.bat`）：
 
 ```sh
 ./gradlew :app:assembleDebug
 ```
 
-标准输出：`app/build/outputs/apk/debug/app-debug.apk`。Android Studio 和 Gradle 默认打包已提供的 ARM64 启动器，不需要额外安装 NDK。仅在修改启动器 C 源码后，才需用配好 NDK r29 的 Termux 环境运行 `sh tools/native.sh` 更新预编译文件。
+标准输出：`app/build/outputs/apk/debug/app-debug.apk`。此 APK 会包含本地生成的启动器。
 
-本机 Termux 使用 ARM64 的 `aapt2` 和已有的 Gradle 缓存：
+Termux 首次构建时从项目配置的官方仓库同步依赖，并指定本机 ARM64 的 `aapt2`：
+
+```sh
+ANDROID_HOME="$HOME/android-sdk" ./gradlew "-Pandroid.aapt2FromMavenOverride=$(command -v aapt2)" :app:assembleDebug
+```
+
+同步后可离线构建并验证：
 
 ```sh
 sh tools/assemble.sh :app:assembleDebug
-python3 tests/verify.py
-sh tests/registry.sh         # Termux：不联网验证目录筛选、镜像校验和持久化
+python3 tests/verify.py     # 可加 --baseline /路径/Debian-0.1.27-arm64.apk 对照签名、权限及保留资源
+sh tests/startup.sh          # Termux：用 APK 内的启动逻辑验证六种冷启动情形
+sh tests/registry.sh         # Termux：用本地 HTTP 应答验证目录、跳转、镜像校验和持久化，不联网
+sh tests/art-smoke.sh ConsoleSmoke  # 包内 JS 桥接方法、会话分帧、输出确认与关闭
 # sh tests/registry.sh live  # 可选：实际查询并下载两个分支的第一个版本（约 60 MB）
 node tests/screen.cjs
 node tests/selection-renderer.cjs

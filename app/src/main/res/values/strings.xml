@@ -22,7 +22,6 @@
     <string name="download_active">正在下载镜像</string>
     <string name="download_percent">%1$d%%</string>
     <string name="download_amount">已下载 %1$.1f / %2$.1f MiB</string>
-    <string name="download_failure">%1$s</string>
     <string name="download_reselect">重新选择版本</string>
     <string name="install_step">3/3 · 安装系统</string>
     <string name="install_title">安装 Debian</string>
