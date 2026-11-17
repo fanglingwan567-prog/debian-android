@@ -1,0 +1,43 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'app.birch.debian'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'app.birch.debian'
+        minSdk 28
+        targetSdk 34
+        versionCode 29
+        versionName '0.1.27'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+            keepDebugSymbols += '**/libbirch.so'
+        }
+    }
+
+}
+
+dependencies {
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+
+    constraints {
+        implementation 'androidx.fragment:fragment:1.5.4'
+        implementation 'androidx.profileinstaller:profileinstaller:1.3.1'
+    }
+}

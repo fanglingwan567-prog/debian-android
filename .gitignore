@@ -1,0 +1,9 @@
+.gradle/
+build/
+local.properties
+dist/
+.idea/
+*.iml
+.cxx/
+.externalNativeBuild/
+__pycache__/
