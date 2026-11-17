@@ -3,7 +3,6 @@ const terminal = new Terminal({cursorBlink:true,fontFamily:'monospace',fontSize:
 const fit = new FitAddon.FitAddon();
 terminal.loadAddon(fit);
 const surface=document.getElementById('term');
-terminal.open(surface);
 terminal.onResize(({cols,rows})=>Birch.resize(cols,rows));
 // Recognize touch gestures before letting WebView or xterm change editing focus.
 function enableGestures(){
@@ -349,7 +348,6 @@ function enableGestures(){
     surface.addEventListener('touchend',end,opts);surface.addEventListener('touchcancel',end,opts);
     return fitScreen;
 }
-const fitScreen=enableGestures();
 const cursorKeys = new Map([['↑','A'],['↓','B'],['→','C'],['←','D'],['HOME','H'],['END','F']]);
 const pageKeys = new Map([['PGUP','5'],['PGDN','6']]);
 let ctrl=false, alt=false;
@@ -413,5 +411,15 @@ terminal.onData(data=>{
     Birch.input(data);
 });
 window.deliver = function(data){terminal.write(Uint8Array.from(atob(data),c=>c.charCodeAt(0)),()=>Birch.consumed());};
-new ResizeObserver(fitScreen).observe(document.body);
-fitScreen(); Birch.ready(terminal.cols,terminal.rows);
+// A freshly attached WebView can load the document before its first nonzero layout.
+let fitScreen;
+function layoutTerminal(){
+    if(!surface.clientWidth || !surface.clientHeight)return;
+    if(fitScreen){fitScreen();return;}
+    terminal.open(surface);
+    fitScreen=enableGestures();
+    fitScreen();
+    Birch.ready(terminal.cols,terminal.rows);
+}
+new ResizeObserver(layoutTerminal).observe(surface);
+layoutTerminal();

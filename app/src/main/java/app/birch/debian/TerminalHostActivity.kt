@@ -22,6 +22,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.doOnPreDraw
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.IOException
@@ -127,7 +128,21 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
         }
         view.isFocusableInTouchMode = true
         view.setOnLongClickListener { true } // Selection belongs to xterm, not Android's action mode.
+        view.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                val source = message.sourceId().orEmpty()
+                if (!bridge.pageReady && message.messageLevel() == ConsoleMessage.MessageLevel.ERROR &&
+                    source.startsWith(ORIGIN) && source.endsWith(".js")) {
+                    reportFailure(id, IOException("终端页面初始化失败：${message.message().take(240)}"))
+                    return true
+                }
+                return super.onConsoleMessage(message)
+            }
+        }
         view.webViewClient = object : WebViewClient() {
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) reportFailure(id, IOException("终端页面加载失败：${error.description}"))
+            }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
                 val url = request.url.toString()
@@ -145,7 +160,9 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
             }
         }
         view.addJavascriptInterface(bridge, "Birch")
-        view.loadUrl("${ORIGIN}index.html")
+        view.doOnPreDraw {
+            if (id == generation && editor === view) view.loadUrl("${ORIGIN}index.html")
+        }
         return view
     }
 
@@ -154,12 +171,16 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
         @Volatile var keyboardVisible = false
         var ctrl by mutableStateOf(false)
         var alt by mutableStateOf(false)
+        var pageReady = false
+            private set
+
         private fun ui(action: (WebView) -> Unit) = runOnUiThread {
             if (id == generation) editor?.let(action)
         }
 
         @JavascriptInterface fun ready(cols: Int, rows: Int) = ui {
-            if (console != null) return@ui
+            if (pageReady) return@ui
+            pageReady = true
             try {
                 val session = Console(runtime.open(RuntimeHost.Operation.SHELL), this@TerminalHostActivity)
                 console = session
