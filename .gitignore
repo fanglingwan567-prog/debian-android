@@ -2,6 +2,7 @@
 build/
 local.properties
 dist/
+tests/
 .idea/
 *.iml
 .cxx/

@@ -21,7 +21,6 @@ app/src/main/jniLibs/         本地生成的 ARM64 启动器（不入库）
 gradle/wrapper/               Gradle Wrapper 配置和 JAR
 gradlew / gradlew.bat          Linux、macOS / Windows 构建入口
 tools/                        Termux 构建及资产准备脚本
-tests/                        主机端回归测试、可选设备测试
 ```
 
 ## 打开流程
@@ -41,11 +40,13 @@ tests/                        主机端回归测试、可选设备测试
 
 没有 systemd/PID 1 或 Docker 兼容性承诺，不提供退出后持久后台会话。`/proc` 与宿主内核相关；SELinux/厂商内核/root 管理器可能拒绝 mount 或 exec，应用不会关闭 SELinux。
 
+终端会话由应用内的 Kotlin Service 持有。按 Home 或切换应用不主动停止；确认退出、划掉最近任务、最外层 Bash 退出或应用进程结束时，native 监督进程停止并回收本次会话的全部后代进程，包括 `nohup`、`setsid` 和双重 fork 的后台服务，随后私有挂载随命名空间释放。系统文件和已保存的数据保留，下次打开创建新会话。监督进程通过 Linux subreaper 收养孤儿进程，并监测应用进程，不依赖 PID/user namespace，也不按进程名称清理其他应用或其他会话。此机制不是 root 安全隔离；主动绕过监督进程的宿主操作不属于会话管理范围。
+
 ## 工具与构建
 
 - 镜像：Docker Official Images 的 `library/debian`，不在安装包中锁死版本号或摘要。每次选择分支重新获取目录；一次下载锁定所选清单摘要及其层摘要，不跟随可变标签。网络请求仅在普通应用进程发出，WebView 保持离线。
 - 安装引导使用 Kotlin **1.9.24**、Compose 编译器 **1.5.14**、Compose BOM **2024.06.00**（UI **1.6.8**、Material 3 **1.2.1**）。颜色取自原 `Theme.Material3.DayNight`，波浪进度使用 Compose Canvas，终端快捷键和确认框使用 Compose。Material Components **1.12.0** 提供 Activity 主题和系统动态配色。终端采用 xterm.js **6.0.0**、addon-fit **0.11.0**；上游许可证在 assets/term 中。`tools/assets.py` 在校验上游包后应用一处本地修正：清除选区时也更新 DOM 渲染器缓存，避免终端高度改变时重画已经取消的选区。Debian 软件版权信息保留在镜像 `/usr/share/doc` 中。
-- 本次工具链：SDK 34、AGP 8.4.1、Gradle 8.8、JDK 21、NDK r29 sysroot。输出使用本地 Android debug key，仅供测试，不是商店发行包。
+- 本次工具链：SDK 34、AGP 8.4.1、Gradle 8.8、JDK 21、NDK r29 sysroot。公开测试版使用本地 Android 测试证书签名；GitHub 附件为不可调试的 Release 构建，不是商店发行签名。
 - `tools/assets.py` 只在重新获取打包输入时需要联网，只下载固定摘要的 xterm 包。源码和所需资产已就位。
 
 仓库不提交 APK、Debian 镜像或编译好的 `libbirch.so`。首次克隆或修改 `launcher.c` 后，先从项目根目录运行：
@@ -70,18 +71,12 @@ Termux 首次构建时从项目配置的官方仓库同步依赖，并指定本�
 ANDROID_HOME="$HOME/android-sdk" ./gradlew "-Pandroid.aapt2FromMavenOverride=$(command -v aapt2)" :app:assembleDebug
 ```
 
-同步后可离线构建并验证：
+同步后可离线构建：
 
 ```sh
-sh tools/assemble.sh :app:assembleDebug
-python3 tests/verify.py     # 可加 --baseline /路径/Debian-0.1.27-arm64.apk 对照签名、权限及保留资源
-sh tests/startup.sh          # Termux：用 APK 内的启动逻辑验证六种冷启动情形
-sh tests/registry.sh         # Termux：用本地 HTTP 应答验证目录、跳转、镜像校验和持久化，不联网
-sh tests/art-smoke.sh ConsoleSmoke  # 包内 JS 桥接方法、会话分帧、输出确认与关闭
-# sh tests/registry.sh live  # 可选：实际查询并下载两个分支的第一个版本（约 60 MB）
-node tests/screen.cjs
-node tests/selection-renderer.cjs
-apksigner verify --verbose app/build/outputs/apk/debug/app-debug.apk
+sh tools/assemble.sh :app:assembleRelease
 ```
 
-`tests/verify.py` 默认验证刚生成的模块 APK，也可传入 APK 路径；需 Python 3.11+，且 `aapt2` 在 PATH 中。`tests/verify.py --image <13.7参考层> --run-guest` 是额外的 ARM64 ELF 冒烟测试，不适用于带 Android 应用 seccomp 策略的宿主。`tests/root_smoke.py <13.7参考层>` 仅在明确授权、隔离测试设备上手工运行：会调用 `su` 并临时创建/清理真实 rootfs。
+输出：`app/build/outputs/apk/release/app-release-unsigned.apk`。分发前需用自己的证书签名；本项目公开测试包继续使用此前的测试证书，以支持覆盖安装。签名密钥不入库。
+
+GitHub 源码仅包含应用源码、资源、构建工具和项目文档，不包含测试程序、APK、Debian 镜像或编译好的 native 启动器。可安装的 Release APK 单独发布在 GitHub Releases。

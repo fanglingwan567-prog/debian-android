@@ -3,8 +3,12 @@ package app.birch.debian
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
+import android.content.Intent
+import android.content.ServiceConnection
 import android.graphics.Color
 import android.os.Build
+import android.os.IBinder
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.webkit.*
@@ -28,7 +32,6 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 
 internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Display {
-    private val runtime by lazy { RuntimeHost(this) }
     private val preferences by lazy { getSharedPreferences("terminal", MODE_PRIVATE) }
     private var terminalRoot: ComposeView? = null
     private var editor: WebView? = null
@@ -36,12 +39,20 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
     private var generation = 0
     private var failure by mutableStateOf<String?>(null)
     private var confirmingExit by mutableStateOf(false)
+    private var service: TerminalService? = null
+    private var connection: ServiceConnection? = null
 
-    private fun stopSession() {
+    private fun stopSession(stop: Boolean = true) {
         generation++ // Drop pending callbacks before closing pipes or releasing the old view.
-        val previous = console
         console = null
-        previous?.close()
+        service?.detach()
+        if (stop && connection != null) {
+            service?.stopSession()
+            stopService(Intent(this, TerminalService::class.java))
+        }
+        service = null
+        connection?.let { unbindService(it) }
+        connection = null
     }
 
     private fun reportFailure(id: Int, ex: IOException) = runOnUiThread {
@@ -181,12 +192,32 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
         @JavascriptInterface fun ready(cols: Int, rows: Int) = ui {
             if (pageReady) return@ui
             pageReady = true
+            val intent = Intent(this@TerminalHostActivity, TerminalService::class.java)
+            val binding = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+                    if (id != generation) return
+                    val host = (binder as TerminalService.Connection).service
+                    service = host
+                    try {
+                        console = host.attach(this@TerminalHostActivity, cols, rows)
+                    } catch (ex: IOException) { reportFailure(id, ex) }
+                }
+
+                override fun onServiceDisconnected(name: ComponentName) {
+                    reportFailure(id, IOException("终端服务连接已断开"))
+                }
+            }
             try {
-                val session = Console(runtime.open(RuntimeHost.Operation.SHELL), this@TerminalHostActivity)
-                console = session
-                session.start()
-                session.resize(cols, rows)
-            } catch (ex: IOException) { reportFailure(id, ex) }
+                startService(intent)
+                if (bindService(intent, binding, BIND_AUTO_CREATE)) connection = binding
+                else {
+                    stopService(intent)
+                    reportFailure(id, IOException("无法连接终端服务"))
+                }
+            } catch (ex: IllegalStateException) {
+                stopService(intent)
+                reportFailure(id, IOException("无法启动终端服务", ex))
+            }
         }
 
         @JavascriptInterface fun showKeyboard() = ui { view ->
@@ -218,7 +249,7 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
         @JavascriptInterface fun input(text: String?) = ui { if (text != null) console?.input(text) }
         @JavascriptInterface fun resize(cols: Int, rows: Int) = ui { console?.resize(cols, rows) }
         @JavascriptInterface fun modifiersChanged(ctrlOn: Boolean, altOn: Boolean) = ui { ctrl = ctrlOn; alt = altOn }
-        @JavascriptInterface fun consumed() = ui { console?.consumed() }
+        @JavascriptInterface fun consumed() = ui { service?.consumed() }
     }
 
     override fun output(source: Console, base64: String) = runOnUiThread {
@@ -237,7 +268,7 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
     }
 
     override fun onDestroy() {
-        stopSession()
+        stopSession(!isChangingConfigurations)
         super.onDestroy()
     }
 

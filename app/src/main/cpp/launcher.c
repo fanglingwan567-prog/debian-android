@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -16,21 +17,24 @@
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
+#include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_IMAGE (256U * 1024U * 1024U)
 #define APP_ID "app.birch.debian"
 #define TOY "/system/bin/toybox"
 
-static void die(const char *s) {
+_Noreturn static void die(const char *s) {
     perror(s);
     exit(1);
 }
 
-static void fail(const char *s) {
+_Noreturn static void fail(const char *s) {
     fprintf(stderr, "%s\n", s);
     exit(1);
 }
@@ -144,17 +148,20 @@ static void file_text(const char *path, int flags, const char *fmt, ...) {
         die(path);
 }
 
-static int status(pid_t p) {
-    int s;
-    while (waitpid(p, &s, 0) < 0)
-        if (errno != EINTR)
-            die("waitpid");
-
+static int exit_code(int s) {
     if (WIFEXITED(s))
         return WEXITSTATUS(s);
     if (WIFSIGNALED(s))
         return 128 + WTERMSIG(s);
     return 1;
+}
+
+static int status(pid_t p) {
+    int s;
+    while (waitpid(p, &s, 0) < 0)
+        if (errno != EINTR)
+            die("waitpid");
+    return exit_code(s);
 }
 
 static void run(char *const argv[]) {
@@ -302,14 +309,14 @@ static void mounts(void) {
 }
 
 static void dns_file(int argc, char **argv) {
-    if (argc <= 4)
+    if (argc <= 5)
         return;
 
     char tmp[] = "root/etc/.resolv-XXXXXX";
     int fd = mkstemp(tmp);
     if (fd < 0)
         die("resolver");
-    for (int i = 4; i < argc; i++) {
+    for (int i = 5; i < argc; i++) {
         unsigned char buf[16];
         if (inet_pton(AF_INET, argv[i], buf) != 1 && inet_pton(AF_INET6, argv[i], buf) != 1)
             fail("Invalid resolver");
@@ -320,10 +327,7 @@ static void dns_file(int argc, char **argv) {
         die("resolver");
 }
 
-static void session(int argc, char **argv) {
-    ready();
-    mounts();
-    dns_file(argc, argv);
+static void terminal(void) {
     if (chroot("root") < 0 || chdir("/") < 0)
         die("chroot");
 
@@ -355,18 +359,29 @@ static void session(int argc, char **argv) {
     // The guest controls only the slave. Parent interprets framed input from the app, never shell output.
     struct pollfd fds[2] = {{0, POLLIN, 0}, {master, POLLIN, 0}};
     unsigned char buf[16384];
+    int shell_status = 0;
+    int shell_done = 0;
+    size_t remaining_output = 0;
     for (;;) {
-        if (poll(fds, 2, -1) < 0) {
+        int timeout = 250;
+        if (shell_done)
+            timeout = 0;
+        int events = poll(fds, 2, timeout);
+        if (events < 0) {
             if (errno == EINTR)
                 continue;
             die("poll");
         }
+        if (shell_done && (!events || remaining_output >= 65536))
+            break;
 
         if (fds[1].revents & POLLIN) {
             ssize_t n = read(master, buf, sizeof buf);
             if (n <= 0)
                 break;
             sendall(1, buf, (size_t)n);
+            if (shell_done)
+                remaining_output += (size_t)n;
         } else if (fds[1].revents & (POLLERR | POLLHUP | POLLNVAL))
             break;
 
@@ -389,15 +404,185 @@ static void session(int argc, char **argv) {
                 break;
         } else if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL))
             break;
+
+        if (!shell_done) {
+            pid_t ended = waitpid(pid, &shell_status, WNOHANG);
+            if (ended < 0 && errno != EINTR)
+                die("wait for shell");
+            if (ended == pid)
+                shell_done = 1;
+        }
     }
 
     close(master);
-    kill(pid, SIGHUP);
-    exit(status(pid));
+    if (shell_done)
+        exit(exit_code(shell_status));
+    if (waitpid(pid, &shell_status, WNOHANG) == pid)
+        exit(exit_code(shell_status));
+    // Never wait on a shell that can ignore HUP. The supervisor owns shutdown.
+    exit(0);
+}
+
+// An open /proc/PID directory stays tied to that process, even after PID reuse.
+static char process_state(int directory, pid_t *parent) {
+    int fd = openat(directory, "stat", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT || errno == ESRCH)
+            return 0;
+        die("process stat");
+    }
+    char text[1024];
+    ssize_t length;
+    do {
+        length = read(fd, text, sizeof text - 1);
+    } while (length < 0 && errno == EINTR);
+    if (length < 0) {
+        int error = errno;
+        close(fd);
+        if (error == ESRCH)
+            return 0;
+        errno = error;
+        die("read process stat");
+    }
+    close(fd);
+    if (!length)
+        return 0;
+    text[length] = '\0';
+    char state;
+    char *end = strrchr(text, ')');
+    if (!end || sscanf(end + 1, " %c %d", &state, parent) != 2)
+        fail("Invalid process stat");
+    return state;
+}
+
+static void stop_children(void) {
+    DIR *processes = opendir("/proc");
+    if (!processes)
+        die("process list");
+    for (;;) {
+        int s;
+        pid_t child;
+        do {
+            child = waitpid(-1, &s, WNOHANG);
+        } while (child > 0 || (child < 0 && errno == EINTR));
+        if (child < 0) {
+            if (errno != ECHILD)
+                die("reap session");
+            break;
+        }
+
+        rewinddir(processes);
+        struct dirent *entry;
+        while ((entry = readdir(processes))) {
+            if (!entry->d_name[0] || strspn(entry->d_name, "0123456789") != strlen(entry->d_name))
+                continue;
+            int fd = openat(dirfd(processes), entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (fd < 0) {
+                if (errno == ENOENT || errno == ESRCH)
+                    continue;
+                die("open process");
+            }
+            pid_t parent = 0;
+            char state = process_state(fd, &parent);
+            close(fd);
+            // Only our unreaped children qualify. Their PIDs cannot be reused until
+            // we wait again. Orphaned grandchildren are adopted on the next pass.
+            if (state && parent == getpid()) {
+                pid_t pid = (pid_t)strtol(entry->d_name, NULL, 10);
+                if (kill(pid, SIGKILL) < 0 && errno != ESRCH)
+                    die("stop session child");
+            }
+        }
+        struct timespec delay = {0, 10000000};
+        nanosleep(&delay, NULL);
+    }
+    closedir(processes);
+}
+
+static void session(int argc, char **argv, uid_t uid) {
+    char *end;
+    long app_pid = strtol(argv[4], &end, 10);
+    if (!*argv[4] || *end || app_pid <= 1 || app_pid > INT32_MAX)
+        fail("Invalid application pid");
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%ld", app_pid);
+    int app = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    struct stat st;
+    if (app < 0 || fstat(app, &st) < 0)
+        die("application process");
+    if (st.st_uid != uid)
+        fail("Unexpected application process owner");
+
+    ready();
+    mounts();
+    dns_file(argc, argv);
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1) < 0)
+        die("session subreaper");
+
+    sigset_t watched, previous;
+    sigemptyset(&watched);
+    sigaddset(&watched, SIGCHLD);
+    sigaddset(&watched, SIGTERM);
+    sigaddset(&watched, SIGHUP);
+    sigaddset(&watched, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &watched, &previous) < 0)
+        die("session signals");
+    int signals = signalfd(-1, &watched, SFD_CLOEXEC | SFD_NONBLOCK);
+    if (signals < 0)
+        die("signal descriptor");
+    pid_t worker = fork();
+    if (worker < 0)
+        die("terminal worker");
+    if (!worker) {
+        close(app);
+        close(signals);
+        if (sigprocmask(SIG_SETMASK, &previous, NULL) < 0)
+            die("terminal signals");
+        terminal();
+        _exit(1);
+    }
+    // Runtime errors must clean up the guest too, not only the normal stop path.
+    if (atexit(stop_children) != 0) {
+        stop_children();
+        fail("Register session cleanup failed");
+    }
+
+    int result = 0;
+    int stopping = 0;
+    while (!stopping) {
+        pid_t parent;
+        char state = process_state(app, &parent);
+        if (!state || state == 'Z' || state == 'X')
+            break;
+        struct pollfd event = {signals, POLLIN, 0};
+        if (poll(&event, 1, 250) < 0 && errno != EINTR) {
+            perror("session poll");
+            result = 1;
+            break;
+        }
+        struct signalfd_siginfo info;
+        while (read(signals, &info, sizeof info) == sizeof info)
+            if (info.ssi_signo != SIGCHLD)
+                stopping = 1;
+        int s;
+        pid_t child;
+        while ((child = waitpid(-1, &s, WNOHANG)) > 0) {
+            if (child == worker) {
+                result = exit_code(s);
+                stopping = 1;
+            }
+        }
+    }
+
+    // Stay outside chroot, alive and holding the private mounts until every
+    // descendant (including setsid/double-fork daemons) has been killed and reaped.
+    close(signals);
+    close(app);
+    exit(result);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4 || argc > 8 || geteuid() != 0)
+    if (argc < 4 || argc > 9 || geteuid() != 0)
         fail("Root authorization required");
 
     char *end = NULL;
@@ -423,8 +608,8 @@ int main(int argc, char **argv) {
         install();
         return 0;
     }
-    if (!strcmp(argv[1], "shell"))
-        session(argc, argv);
+    if (!strcmp(argv[1], "shell") && argc >= 5)
+        session(argc, argv, (uid_t)u);
     else
         fail("Unknown operation");
     return 0;

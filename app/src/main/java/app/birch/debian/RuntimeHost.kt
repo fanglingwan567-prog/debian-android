@@ -22,6 +22,7 @@ internal class RuntimeHost(context: Context) {
         }
         val command = StringBuilder("exec '${helper.absolutePath}' ${operation.argument} ${android.os.Process.myUid()} '$files'")
         if (operation == Operation.SHELL) {
+            command.append(' ').append(android.os.Process.myPid())
             val network = app.getSystemService(ConnectivityManager::class.java)
             val servers = network.getLinkProperties(network.activeNetwork)?.dnsServers.orEmpty()
             val literal = Regex("[a-fA-F0-9:.]+")
