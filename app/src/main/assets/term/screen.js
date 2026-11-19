@@ -4,17 +4,23 @@ const fit = new FitAddon.FitAddon();
 terminal.loadAddon(fit);
 const surface=document.getElementById('term');
 terminal.onResize(({cols,rows})=>Birch.resize(cols,rows));
+window.keyboardVisibilityChanged=function(visible){
+    // Keep DOM focus and composition intact. A focused textarea must not let a
+    // WebView touch reopen a keyboard that Android Back has just hidden.
+    if(visible)terminal.textarea.inputMode='text';
+    else terminal.textarea.inputMode='none';
+};
 // Recognize touch gestures before letting WebView or xterm change editing focus.
 function enableGestures(){
-    let mode='idle', lastY=0, startX=0, pending=0, cellHeight=1, span=0, startFont=0;
     const tapLimitMs=500;
-    const touchSlop=Math.max(12,Birch.touchSlopDp());
-    let holdTimer=0, press=null, anchor=null, fitting=false;
+    const touchSlop=Birch.touchSlopDp();
+    const contacts=new Map();
+    let gesture=null, holdTimer=0, keyboardRequest=0;
+    let anchor=null, fitting=false, lastPointerWasTouch=false, reportingMouse=false;
     const grips=['start','end'].map(side=>({side,button:document.getElementById(side+'-grip'),stem:document.getElementById(side+'-stem')}));
     const gripSize=parseFloat(getComputedStyle(grips[0].button).width),radius=gripSize/2;
-    let drag=null, lastPointerWasTouch=false;
     function hideGrips(){
-        finishDrag();
+        if(gesture && gesture.kind==='grip')finishGesture();
         for(const grip of grips){grip.button.hidden=true;grip.stem.removeAttribute('d');}
     }
     function syncGrips(){
@@ -78,37 +84,8 @@ function enableGestures(){
         if(pos && lo===pos.start.y*terminal.cols+pos.start.x && hi===pos.end.y*terminal.cols+pos.end.x)return;
         terminal.select(lo%terminal.cols,Math.floor(lo/terminal.cols),hi-lo);syncGrips();
     }
-    function finishDrag(){
-        if(!drag)return;
-        const {button,id}=drag;drag=null;
-        button.removeAttribute('data-dragging');
-        if(button.hasPointerCapture(id))button.releasePointerCapture(id);
-    }
-    function trackDrag(e){
-        if(!drag || e.pointerId!==drag.id)return;
-        consume(e);
-        if(e.type!=='pointercancel'){
-            if(Math.hypot(e.clientX-drag.x,e.clientY-drag.y)>3)drag.moved=true;
-            if(drag.moved)adjustGrip(drag.side,hitCell(e.clientX+drag.dx,e.clientY+drag.dy));
-        }
-        if(e.type!=='pointermove')finishDrag();
-    }
-    // A moving handle can lose capture; keep tracking that contact across the WebView.
-    for(const event of ['pointermove','pointerup','pointercancel'])document.addEventListener(event,trackDrag,true);
     for(const grip of grips){
         const button=grip.button;
-        button.addEventListener('pointerdown',e=>{
-            if(fromTouch(e)){lastPointerWasTouch=true;consume(e);}
-            if(drag || e.button!==0 || !e.isPrimary)return;
-            // A new primary touch can adjust a committed selection even if WebView
-            // never delivered the previous contact's final touch event.
-            if(e.pointerType==='touch')finishSelectionContact();
-            if(mode!=='idle' || button.hidden)return;
-            if(!fromTouch(e))consume(e);
-            button.setPointerCapture(e.pointerId);
-            drag={id:e.pointerId,side:grip.side,button,x:e.clientX,y:e.clientY,moved:false,dx:grip.cellX-e.clientX,dy:grip.cellY-e.clientY};
-            button.setAttribute('data-dragging','');
-        });
         button.addEventListener('keydown',e=>{
             if(e.key==='Enter' || e.key===' '){consume(e);copySelection();return;}
             if(e.key==='Escape'){consume(e);dismissSelection();return;}
@@ -151,24 +128,6 @@ function enableGestures(){
         }finally{fitting=false;start.dispose();end.dispose();}
         syncGrips();
     }
-    function clearPress(){clearTimeout(holdTimer);holdTimer=0;press=null;}
-    function beginPress(touch,time){
-        const current={id:touch.identifier,deadline:time+tapLimitMs,selection:anchor};
-        press=current;mode='pending';startX=touch.clientX;lastY=touch.clientY;pending=0;
-        const screen=surface.querySelector('.xterm-screen');
-        cellHeight=Math.max(1,screen.getBoundingClientRect().height/terminal.rows);
-        // DOM timestamps and performance.now() share an origin. Count from physical
-        // down, not from delivery to a busy renderer. Exactly 500 ms is still a tap.
-        const remaining=Math.max(0,Math.floor(current.deadline-performance.now())+1);
-        holdTimer=setTimeout(()=>{if(press===current)startSelection();},remaining);
-    }
-    function finishSelectionContact(){
-        if(mode!=='select' && mode!=='extend')return;
-        mode='idle';
-        // A valid range in the line's blank padding has no clipboard text yet.
-        // Keep its handles: the next contact can extend it onto actual output.
-        if(!terminal.hasSelection())dismissSelection();
-    }
     function dismissSelection(){
         if(!anchor)return;
         anchor=null;hideGrips();terminal.clearSelection();
@@ -206,13 +165,13 @@ function enableGestures(){
     function tapSelection(x,y){
         const pos=terminal.getSelectionPosition();
         const box=surface.querySelector('.xterm-screen').getBoundingClientRect();
-        if(pos && insideSelection(startX,lastY,pos,box) && insideSelection(x,y,pos,box))copySelection();
+        if(pos && insideSelection(gesture.x,gesture.y,pos,box) && insideSelection(x,y,pos,box))copySelection();
         else dismissSelection();
     }
     function startSelection(){
-        if(!press || mode!=='pending')return;
-        clearPress();mode='select';
-        const hit=hitCell(startX,lastY);if(!hit){dismissSelection();return;}
+        clearTimeout(holdTimer);
+        gesture.kind='select';
+        const hit=hitCell(gesture.x,gesture.y);if(!hit){dismissSelection();return;}
         let left=hit.col,right=hit.end-hit.start+left;
         if(/\S/.test(hit.line.getCell(left).getChars())){
             while(left>0){
@@ -238,114 +197,160 @@ function enableGestures(){
     terminal.onScroll(syncHistoryTrack);terminal.onResize(syncHistoryTrack);
     terminal.buffer.onBufferChange(syncHistoryTrack);syncHistoryTrack();
     const opts={capture:true,passive:false};
-    function onHistoryTrack(target){return !!(target && target.closest && target.closest('.scrollbar.vertical'));}
+    function consume(e){e.preventDefault();e.stopImmediatePropagation();}
     function fromTouch(e){return e.pointerType==='touch' || !!(e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents);}
-    surface.addEventListener('pointerdown',e=>{
-        lastPointerWasTouch=fromTouch(e);
-        if(!lastPointerWasTouch)return;
-        // Let xterm capture the pointer and map the thumb position to scrollback.
-        // Prevent the browser's focus change, not propagation to the scrollbar.
-        if(onHistoryTrack(e.target) && e.isPrimary && !drag && !press){e.preventDefault();return;}
-        consume(e);
-    },opts);
-    surface.addEventListener('contextmenu',e=>{
-        if(press && fromTouch(e) && e.timeStamp>press.deadline)startSelection();
-        if(mode!=='idle' || lastPointerWasTouch || fromTouch(e) || e.button!==2)consume(e);
-        else e.preventDefault();
-    },opts);
-    for(const name of ['mousedown','mouseup','click'])surface.addEventListener(name,e=>{
-        // The only programmatic mouse events on this terminal are our TUI reports.
-        // A real mouse/pen starts its own pointerdown, unlike a touch's trailing click.
-        if(e.isTrusted && (lastPointerWasTouch || fromTouch(e)))consume(e);
-    },opts);
-    for(const {button} of grips){
-        // Pointer events drive the drag; the handle itself must not become an IME target.
-        for(const name of ['touchstart','touchend','contextmenu'])button.addEventListener(name,consume,opts);
+    function finishGesture(){
+        clearTimeout(holdTimer);
+        if(gesture && gesture.kind==='zoom' && terminal.options.fontSize!==gesture.fontSize)Birch.saveFontSize(terminal.options.fontSize);
+        if(gesture && gesture.kind==='grip')gesture.grip.button.removeAttribute('data-dragging');
+        gesture=null;
+        // Remaining fingers cannot start a new tap after a pinch or cancellation.
+        if(contacts.size)gesture={kind:'suppress'};
+    }
+    function resetContacts(){
+        const previous=[...contacts.entries()];
+        contacts.clear();finishGesture();
+        for(const [id,point] of previous)if(point.target.hasPointerCapture(id))point.target.releasePointerCapture(id);
+    }
+    function pinchDistance(){
+        const [first,second]=contacts.values();
+        return Math.hypot(first.x-second.x,first.y-second.y);
     }
     function activateInput(x,y){
-        // This runs synchronously inside the accepted touchend. IME visibility is
-        // not editor focus: Back may hide the IME while the textarea stays focused.
-        const editor=terminal.textarea;
-        if(document.activeElement!==editor)terminal.focus();
-        if(!Birch.isKeyboardVisible())Birch.showKeyboard();
+        // Only an accepted pointerup may focus the editor or request the IME.
+        // Back can hide the keyboard without removing the textarea's focus.
+        terminal.textarea.inputMode='text';
+        if(document.activeElement!==terminal.textarea)terminal.focus();
+        if(!Birch.isKeyboardVisible())Birch.showKeyboard(keyboardRequest);
         if(terminal.modes.mouseTrackingMode==='none')return;
         const target=document.elementFromPoint(x,y);
         if(!target || !surface.contains(target))return;
-        target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0,buttons:1,clientX:x,clientY:y}));
-        target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,button:0,buttons:0,clientX:x,clientY:y}));
+        reportingMouse=true;
+        try{
+            target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0,buttons:1,clientX:x,clientY:y}));
+            target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,button:0,buttons:0,clientX:x,clientY:y}));
+        }finally{reportingMouse=false;}
     }
-    const distance=points=>Math.hypot(points[0].clientX-points[1].clientX,points[0].clientY-points[1].clientY);
-    function consume(e){e.preventDefault();e.stopPropagation();}
-    function finishZoom(){if(mode==='zoom' && terminal.options.fontSize!==startFont)Birch.saveFontSize(terminal.options.fontSize);}
-    surface.addEventListener('touchstart',e=>{
-        consume(e);lastPointerWasTouch=true;
-        if(drag || mode==='rail')return;
-        clearPress();
-        if(onHistoryTrack(e.target)){finishZoom();mode='rail';return;}
-        const p=e.touches;
-        if(p.length===2){
-            dismissSelection();mode='zoom';span=distance(p);startFont=terminal.options.fontSize;
-        }else if(p.length===1)beginPress(p[0],e.timeStamp);
-        else{finishZoom();mode='suppress';}
-    },opts);
-    surface.addEventListener('touchmove',e=>{
+    document.addEventListener('pointerdown',e=>{
+        const grip=grips.find(item=>item.button===e.target && !item.button.hidden);
+        lastPointerWasTouch=fromTouch(e);
+        if(!lastPointerWasTouch && !grip)return;
+        if(e.button!==0 || (!grip && !surface.contains(e.target)))return;
+        // A new primary pointer also recovers from a contact lost during a window change.
+        if(e.isPrimary && contacts.size)resetContacts();
+        keyboardRequest=Birch.cancelKeyboardRequest();
+        if(!Birch.isKeyboardVisible())terminal.textarea.inputMode='none';
+        let target=surface;
+        if(grip)target=grip.button;
+        contacts.set(e.pointerId,{x:e.clientX,y:e.clientY,target});
+        if(gesture && gesture.kind==='rail'){
+            consume(e);return;
+        }
+        if(contacts.size===1 && e.target.closest('.scrollbar.vertical')){
+            gesture={kind:'rail',id:e.pointerId};
+            // xterm owns the thumb's pointer capture and scrolling, never editing focus.
+            e.preventDefault();return;
+        }
         consume(e);
-        const p=e.touches;
-        if(press && p.length===1 && p[0].identifier===press.id && e.timeStamp>press.deadline)startSelection();
-        if(mode==='zoom' && p.length===2){
-            if(!span){span=distance(p);return;}
-            const size=Math.min(36,Math.max(8,Math.round(startFont*distance(p)/span)));
+        target.setPointerCapture(e.pointerId);
+        if(contacts.size>1){
+            const suppressed=gesture && gesture.kind==='suppress';
+            finishGesture();
+            if(contacts.size===2 && !suppressed){
+                gesture={kind:'zoom',span:pinchDistance(),fontSize:terminal.options.fontSize};
+                dismissSelection();
+            }
+            return;
+        }
+        if(grip){
+            gesture={kind:'grip',grip,x:e.clientX,y:e.clientY,moved:false,dx:grip.cellX-e.clientX,dy:grip.cellY-e.clientY};
+            grip.button.setAttribute('data-dragging','');
+            return;
+        }
+        gesture={kind:'pending',x:e.clientX,y:e.clientY,lastY:e.clientY,pending:0,
+            deadline:e.timeStamp+tapLimitMs,selection:anchor,
+            cellHeight:Math.max(1,surface.querySelector('.xterm-screen').getBoundingClientRect().height/terminal.rows)};
+        const current=gesture;
+        const remaining=Math.max(0,Math.floor(current.deadline-performance.now())+1);
+        holdTimer=setTimeout(()=>{if(gesture===current && gesture.kind==='pending')startSelection();},remaining);
+    },opts);
+    function moveContact(id,point){
+        const contact=contacts.get(id);
+        contact.x=point.clientX;contact.y=point.clientY;
+        const g=gesture;
+        if(g.kind==='zoom'){
+            const span=pinchDistance();
+            if(!g.span){g.span=span;return;}
+            const size=Math.min(36,Math.max(8,Math.round(g.fontSize*span/g.span)));
             if(size!==terminal.options.fontSize){terminal.options.fontSize=size;fitScreen();}
             return;
         }
-        if((mode==='select' || mode==='extend') && p.length===1){
-            if(mode==='select' && Math.hypot(p[0].clientX-startX,p[0].clientY-lastY)<=touchSlop)return;
-            mode='extend';selectTo(hitCell(p[0].clientX,p[0].clientY));return;
+        if(g.kind==='suppress' || g.kind==='rail')return;
+        const dx=point.clientX-g.x,dy=point.clientY-g.y;
+        if(g.kind==='grip'){
+            if(Math.hypot(dx,dy)>3)g.moved=true;
+            if(g.moved)adjustGrip(g.grip.side,hitCell(point.clientX+g.dx,point.clientY+g.dy));
+            return;
         }
-        if(p.length!==1 || (mode!=='pending' && mode!=='swipe' && mode!=='scroll'))return;
-        const delta=lastY-p[0].clientY;
-        if(mode==='pending' || mode==='swipe'){
-            const dx=startX-p[0].clientX;
-            if(Math.hypot(delta,dx)<=touchSlop)return;
-            clearPress();
-            if(Math.abs(delta)<Math.abs(dx)){mode='swipe';return;}
-            dismissSelection();mode='scroll';
+        if(g.kind==='select' || g.kind==='extend'){
+            if(g.kind==='select' && Math.hypot(dx,dy)<=touchSlop)return;
+            g.kind='extend';selectTo(hitCell(point.clientX,point.clientY));return;
         }
-        pending+=delta;lastY=p[0].clientY;
-        const lines=Math.trunc(pending/cellHeight);if(!lines)return;
-        pending-=lines*cellHeight;
+        if(g.kind==='swipe' && Math.abs(dy)>touchSlop && Math.abs(dy)>=Math.abs(dx)){
+            g.kind='scroll';dismissSelection();
+        }
+        if(g.kind!=='scroll')return;
+        g.pending+=g.lastY-point.clientY;g.lastY=point.clientY;
+        const lines=Math.trunc(g.pending/g.cellHeight);
+        if(!lines)return;
+        g.pending-=lines*g.cellHeight;
         if(terminal.buffer.active.type==='normal')terminal.scrollLines(lines);
-        else {
-            // Full-screen programs have no scrollback: send wheel input at the finger instead.
-            const target=document.elementFromPoint(p[0].clientX,p[0].clientY);
-            if(target && surface.contains(target))target.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,clientX:p[0].clientX,clientY:p[0].clientY,deltaY:lines,deltaMode:1}));
+        else{
+            const target=document.elementFromPoint(point.clientX,point.clientY);
+            if(target && surface.contains(target))target.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,clientX:point.clientX,clientY:point.clientY,deltaY:lines,deltaMode:1}));
         }
-    },opts);
-    function end(e){
-        consume(e);
-        if(mode==='rail'){if(!e.touches.length)mode='idle';return;}
-        if(mode==='idle')return;
-        if(press && !e.touches.length){
-            const up=e.changedTouches[0];
-            if(up && up.identifier===press.id && Math.hypot(up.clientX-startX,up.clientY-lastY)<=touchSlop){
-                if(e.timeStamp>press.deadline)startSelection();
-                else if(e.type==='touchend'){
-                    // A selection tap never falls through to editing, even if the
-                    // selected buffer was cleared during this contact.
-                    if(!press.selection)activateInput(up.clientX,up.clientY);
-                    else if(press.selection===anchor)tapSelection(up.clientX,up.clientY);
-                }
-            }
-        }
-        clearPress();finishZoom();finishSelectionContact();
-        mode='idle';if(e.touches.length)mode='suppress';
     }
+    function trackPointer(e){
+        if(!contacts.has(e.pointerId))return;
+        const rail=gesture.kind==='rail' && gesture.id===e.pointerId;
+        if(rail)e.preventDefault();
+        else consume(e);
+        const cancelled=e.type==='pointercancel' || e.type==='lostpointercapture';
+        if(!cancelled){
+            let points=[];
+            if(e.getCoalescedEvents)points=e.getCoalescedEvents();
+            points.push(e);
+            if(gesture.kind==='pending'){
+                // Inspect the whole batch before deciding on a late long press.
+                // Returning to the start never restores a rejected tap.
+                if(points.some(point=>Math.hypot(point.clientX-gesture.x,point.clientY-gesture.y)>touchSlop)){
+                    clearTimeout(holdTimer);gesture.kind='swipe';
+                }else if(e.timeStamp>gesture.deadline)startSelection();
+            }
+            for(const point of points)moveContact(e.pointerId,point);
+        }
+        if(e.type==='pointermove')return;
+        if(!cancelled && gesture.kind==='pending'){
+            // A tap that began with a selection never falls through to editing.
+            if(!gesture.selection)activateInput(e.clientX,e.clientY);
+            else if(gesture.selection===anchor)tapSelection(e.clientX,e.clientY);
+        }
+        contacts.delete(e.pointerId);
+        if(rail || gesture.kind!=='rail')finishGesture();
+    }
+    for(const name of ['pointermove','pointerup','pointercancel','lostpointercapture'])document.addEventListener(name,trackPointer,opts);
+    // No TouchEvent recognizer: suppress the browser/xterm compatibility path only.
+    for(const name of ['touchstart','touchmove','touchend','touchcancel'])document.addEventListener(name,consume,opts);
+    for(const name of ['mousedown','mouseup','click'])document.addEventListener(name,e=>{
+        if(!reportingMouse && (lastPointerWasTouch || fromTouch(e)))consume(e);
+    },opts);
+    document.addEventListener('contextmenu',e=>{
+        if(gesture || lastPointerWasTouch || fromTouch(e) || e.target.closest('.grip'))consume(e);
+        else e.preventDefault();
+    },opts);
     window.addEventListener('blur',()=>{
-        clearPress();finishZoom();finishDrag();
-        finishSelectionContact();
-        mode='idle';
+        keyboardRequest=Birch.cancelKeyboardRequest();resetContacts();
     });
-    surface.addEventListener('touchend',end,opts);surface.addEventListener('touchcancel',end,opts);
     return fitScreen;
 }
 const cursorKeys = new Map([['↑','A'],['↓','B'],['→','C'],['←','D'],['HOME','H'],['END','F']]);
@@ -417,6 +422,7 @@ function layoutTerminal(){
     if(!surface.clientWidth || !surface.clientHeight)return;
     if(fitScreen){fitScreen();return;}
     terminal.open(surface);
+    window.keyboardVisibilityChanged(Birch.isKeyboardVisible());
     fitScreen=enableGestures();
     fitScreen();
     Birch.ready(terminal.cols,terminal.rows);

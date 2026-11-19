@@ -30,6 +30,7 @@ import androidx.core.view.doOnPreDraw
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 
 internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Display {
     private val preferences by lazy { getSharedPreferences("terminal", MODE_PRIVATE) }
@@ -90,7 +91,11 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
                 WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.captionBar())
             view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
             val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            val visibilityChanged = bridge.keyboardVisible != visible
             bridge.keyboardVisible = visible
+            if (id == generation && bridge.pageReady && visibilityChanged) {
+                editor?.evaluateJavascript("keyboardVisibilityChanged($visible)", null)
+            }
             if (id == generation && showKeys && !visible && console != null) editor?.evaluateJavascript("clearShortcutModifiers()", null)
             showKeys = visible
             WindowInsetsCompat.CONSUMED
@@ -127,7 +132,12 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createEditor(id: Int, bridge: Bridge): WebView {
-        val view = WebView(this)
+        val view = object : WebView(this) {
+            override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+                if (!hasWindowFocus) bridge.cancelKeyboardRequest()
+                super.onWindowFocusChanged(hasWindowFocus)
+            }
+        }
         editor = view
         view.setBackgroundColor(TERMINAL_BACKGROUND)
         view.settings.apply {
@@ -178,6 +188,7 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
     }
 
     private inner class Bridge(private val id: Int) {
+        private val keyboardRequest = AtomicInteger()
         // Insets are set on main; JS reads visibility synchronously from WebView's bridge thread.
         @Volatile var keyboardVisible = false
         var ctrl by mutableStateOf(false)
@@ -220,11 +231,14 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
             }
         }
 
-        @JavascriptInterface fun showKeyboard() = ui { view ->
+        @JavascriptInterface fun cancelKeyboardRequest(): Int = keyboardRequest.incrementAndGet()
+
+        @JavascriptInterface fun showKeyboard(request: Int) = ui { view ->
+            if (request != keyboardRequest.get()) return@ui
             if (!view.hasWindowFocus() || keyboardVisible || (!view.hasFocus() && !view.requestFocus())) return@ui
             // Wait for the tap's focus change. A stale bridge must not target a replacement editor.
             view.post {
-                if (id == generation && editor === view && !keyboardVisible && view.isAttachedToWindow && view.hasWindowFocus() && view.hasFocus()) {
+                if (request == keyboardRequest.get() && id == generation && editor === view && !keyboardVisible && view.isAttachedToWindow && view.hasWindowFocus() && view.hasFocus()) {
                     WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.ime())
                 }
             }
