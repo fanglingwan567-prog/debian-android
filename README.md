@@ -48,7 +48,7 @@ tools/                        Termux 构建及资产准备脚本
 
 - 镜像：Docker Official Images 的 `library/debian`，不在安装包中锁死版本号或摘要。每次选择分支重新获取目录；一次下载锁定所选清单摘要及其层摘要，不跟随可变标签。网络请求仅在普通应用进程发出，WebView 保持离线。
 - 安装引导使用 Kotlin **1.9.24**、Compose 编译器 **1.5.14**、Compose BOM **2024.06.00**（UI **1.6.8**、Material 3 **1.2.1**）。颜色取自原 `Theme.Material3.DayNight`，波浪进度使用 Compose Canvas，终端快捷键和确认框使用 Compose。Material Components **1.12.0** 提供 Activity 主题和系统动态配色。终端采用 xterm.js **6.0.0**、addon-fit **0.11.0**；上游许可证在 assets/term 中。`tools/assets.py` 在校验上游包后应用一处本地修正：清除选区时也更新 DOM 渲染器缓存，避免终端高度改变时重画已经取消的选区。Debian 软件版权信息保留在镜像 `/usr/share/doc` 中。
-- 项目工具链：SDK 34、AGP 8.4.1、Gradle 8.8、JDK 21。0.1.34 本地构建使用 NDK r30 sysroot 和 ARM64 aapt2。GitHub 附件为不可调试的 Release 构建；0.1.34 起使用独立的 RSA 3072 发布密钥，早期公开测试版使用的是其他测试证书。
+- 项目工具链：SDK 34、AGP 8.4.1、Gradle 8.8、JDK 21。0.1.34 本地构建使用 NDK r30 sysroot 和 ARM64 aapt2。GitHub 附件为不可调试的 Release 构建；0.1.34 使用的 RSA 3072 密钥现已按项目所有者要求公开为共用测试密钥，早期公开测试版使用的是其他测试证书。
 - `tools/assets.py` 只在重新获取打包输入时需要联网，只下载固定摘要的 xterm 包，并应用上述选区修正。Android 软键盘通过原生输入连接转发已提交文本，不再从隐藏输入框计算文本差量，不自动补括号、移动光标或替换旧文字；未确认的组合输入暂存，确认后原样发送，退格和删除按输入法实际请求发送按键。显式启用的 CTRL/ALT 快捷键仍然生效。源码和所需资产已就位。
 
 仓库不提交 APK、Debian 镜像或编译好的 `libbirch.so`。首次克隆或修改 `launcher.c` 后，先从项目根目录运行：
@@ -79,7 +79,9 @@ ANDROID_HOME="$HOME/android-sdk" ./gradlew "-Pandroid.aapt2FromMavenOverride=$(c
 sh tools/assemble.sh :app:assembleRelease
 ```
 
-输出：`app/build/outputs/apk/release/app-release-unsigned.apk`。分发前需签名。0.1.34 起使用独立的发布密钥，证书 SHA-256：`04:53:F8:DB:B3:F5:B1:DF:90:D0:15:9D:36:69:84:2F:5D:36:A2:1F:9E:BB:E0:B7:75:20:B7:22:73:C5:A3:89`。签名私钥、密码不入库。
+输出：`app/build/outputs/apk/release/app-release-unsigned.apk`。分发前需签名。与 0.1.34 相同的私钥、公开密码、证书和签名步骤见 [公开测试签名说明](signing/public-test/README.md)。证书 SHA-256：`04:53:F8:DB:B3:F5:B1:DF:90:D0:15:9D:36:69:84:2F:5D:36:A2:1F:9E:BB:E0:B7:75:20:B7:22:73:C5:A3:89`。
+
+**公开密钥警告：** 此私钥由所有者明确授权公开，仅供共用测试，禁止用于正式安全发布。任何人都能签出可作为本应用更新的 APK，签名不能证明发布者身份。安装现成 APK 无需私钥；共用密钥仅有助于自行构建时保持签名一致，不保证所有设备都能安装。Gradle 默认不自动采用公开密钥；其他私钥和账号凭据不得上传。
 
 **更换签名提示：** 0.1.34 不能直接覆盖其他证书签名的旧版 APK。卸载或清除应用数据会删除应用内 Debian 和其中的文件，请先另行备份数据，不要为安装新版本直接卸载旧版。
 
