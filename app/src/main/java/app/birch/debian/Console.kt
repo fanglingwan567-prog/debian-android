@@ -12,6 +12,10 @@ import kotlin.concurrent.thread
 
 /** Owns the process and both pipes. WebView acknowledges each output chunk before the next read. */
 internal class Console(private val process: Process, private val display: Display) : AutoCloseable {
+    companion object {
+        const val MAX_INPUT_LENGTH = 65536
+    }
+
     interface Display {
         fun output(source: Console, base64: String)
         fun ended(source: Console, reason: String?)
@@ -50,7 +54,7 @@ internal class Console(private val process: Process, private val display: Displa
     fun consumed() { if (!closed.get()) ack.release() }
 
     fun input(text: String) {
-        if (text.length <= 65536) write('I', text.toByteArray(Charsets.UTF_8))
+        if (text.length <= MAX_INPUT_LENGTH) write('I', text.toByteArray(Charsets.UTF_8))
     }
 
     fun resize(cols: Int, rows: Int) {

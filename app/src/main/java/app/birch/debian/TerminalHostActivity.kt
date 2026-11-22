@@ -11,6 +11,8 @@ import android.os.Build
 import android.os.IBinder
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.webkit.*
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -133,6 +135,11 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
     @SuppressLint("SetJavaScriptEnabled")
     private fun createEditor(id: Int, bridge: Bridge): WebView {
         val view = object : WebView(this) {
+            override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+                val target = super.onCreateInputConnection(outAttrs) ?: return null
+                return TerminalInputConnection(target, bridge::inputFromIme)
+            }
+
             override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
                 if (!hasWindowFocus) bridge.cancelKeyboardRequest()
                 super.onWindowFocusChanged(hasWindowFocus)
@@ -261,6 +268,9 @@ internal abstract class TerminalHostActivity : AppCompatActivity(), Console.Disp
         @JavascriptInterface fun fontSize() = preferences.getInt("fontSize", 14)
         @JavascriptInterface fun saveFontSize(size: Int) { if (size in 8..36) ui { preferences.edit().putInt("fontSize", size).apply() } }
         @JavascriptInterface fun input(text: String?) = ui { if (text != null) console?.input(text) }
+        fun inputFromIme(text: String) = ui { view ->
+            view.evaluateJavascript("terminal.input(${JSONObject.quote(text)},true)", null)
+        }
         @JavascriptInterface fun resize(cols: Int, rows: Int) = ui { console?.resize(cols, rows) }
         @JavascriptInterface fun modifiersChanged(ctrlOn: Boolean, altOn: Boolean) = ui { ctrl = ctrlOn; alt = altOn }
         @JavascriptInterface fun consumed() = ui { service?.consumed() }

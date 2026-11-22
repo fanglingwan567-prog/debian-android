@@ -4,19 +4,25 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 @Composable
 internal fun SetupScreen(state: SetupState.Page, model: SetupViewModel) {
+    val focusManager = LocalFocusManager.current
     MaterialTheme(colorScheme = appColors()) {
         Surface(modifier = Modifier.fillMaxSize()) {
             Column {
@@ -35,12 +41,27 @@ internal fun SetupScreen(state: SetupState.Page, model: SetupViewModel) {
                                 .padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 24.dp)
                         ) {
                             when (state) {
-                                is SetupState.PermissionFailed, SetupState.Checking -> {
+                                is SetupState.Permission, SetupState.Checking -> {
                                     PageHeading(R.string.permission_step, R.string.permission_title,
                                         stringResource(R.string.root_grant_message, stringResource(R.string.app_name)))
-                                    if (state is SetupState.PermissionFailed) {
-                                        Failure(stringResource(R.string.permission_failure, state.error))
-                                        Action(R.string.permission_retry, onClick = model::checkPermission)
+                                    val requestPermission = {
+                                        focusManager.clearFocus()
+                                        model.checkPermission()
+                                    }
+                                    OutlinedTextField(
+                                        value = model.suPath, onValueChange = model::changeSuPath,
+                                        modifier = Modifier.fillMaxWidth().padding(top = 20.dp),
+                                        enabled = state is SetupState.Permission, singleLine = true,
+                                        label = { Text(stringResource(R.string.su_path_label)) },
+                                        placeholder = { Text(stringResource(R.string.su_path_placeholder)) },
+                                        supportingText = { Text(stringResource(R.string.su_path_help)) },
+                                        keyboardOptions = KeyboardOptions(autoCorrect = false, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                                        keyboardActions = KeyboardActions(onDone = { requestPermission() })
+                                    )
+                                    if (state is SetupState.Permission) {
+                                        state.error?.let { Failure(stringResource(R.string.permission_failure, it)) }
+                                        val label = if (state.error == null) R.string.permission_action else R.string.permission_retry
+                                        Action(label, onClick = requestPermission)
                                     } else {
                                         BusyIndicator()
                                     }

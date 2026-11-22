@@ -12,7 +12,18 @@ import java.util.concurrent.TimeUnit
 internal class RuntimeHost(context: Context) {
     private val app = context.applicationContext
     private val helper = File(app.applicationInfo.nativeLibraryDir, "libbirch.so")
+    private val preferences = app.getSharedPreferences("runtime", Context.MODE_PRIVATE)
+    val suPath: String get() = preferences.getString("su_path", "").orEmpty()
+    val hasSuPath: Boolean get() = preferences.contains("su_path")
     enum class Operation(val argument: String) { CHECK("check"), INSTALL("install"), SHELL("shell") }
+
+    fun configureSuPath(path: String) {
+        val normalized = path.trim()
+        if (normalized.isNotEmpty() && (!File(normalized).isAbsolute || normalized.any { it.isISOControl() })) {
+            throw IOException("请填写 su 可执行文件的绝对路径，或留空使用系统 su")
+        }
+        preferences.edit().putString("su_path", normalized).apply()
+    }
 
     fun open(operation: Operation): Process {
         if (!helper.canExecute()) throw IOException("此版本需要 ARM64 设备及已解包的启动器")
@@ -34,7 +45,9 @@ internal class RuntimeHost(context: Context) {
                 if (++count == 4) break
             }
         }
-        return ProcessBuilder("su", "-c", command.toString()).redirectErrorStream(true).start()
+        val configured = suPath
+        val executable = if (configured.isEmpty()) "su" else configured
+        return ProcessBuilder(executable, "-c", command.toString()).redirectErrorStream(true).start()
     }
 
     fun check(): String = run(Operation.CHECK, 90) {}

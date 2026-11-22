@@ -3,6 +3,9 @@ package app.birch.debian
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
@@ -13,10 +16,12 @@ internal class SetupViewModel(application: Application) : AndroidViewModel(appli
     private val images = ImageStore(application.filesDir)
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
-    private val current = MutableLiveData<SetupState>()
+    private val current = MutableLiveData<SetupState>(SetupState.Permission())
     val state: LiveData<SetupState> = current
+    var suPath by mutableStateOf(host.suPath)
+        private set
 
-    init { checkPermission() }
+    init { if (host.hasSuPath) checkPermission() }
 
     // Only one operation can run. Results and progress from its single writer reach main in order.
     // A cleared model drops late callbacks, even when blocking I/O outlives interruption.
@@ -32,10 +37,19 @@ internal class SetupViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    fun changeSuPath(value: String) {
+        if (current.value is SetupState.Permission) suPath = value
+    }
+
     fun checkPermission() {
-        val state = current.value
-        if (state != null && state !is SetupState.PermissionFailed) return
-        runTask(SetupState.Checking, SetupState::PermissionFailed) {
+        if (current.value !is SetupState.Permission) return
+        try {
+            host.configureSuPath(suPath)
+        } catch (ex: java.io.IOException) {
+            current.value = SetupState.Permission(ex.reason())
+            return
+        }
+        runTask(SetupState.Checking, SetupState::Permission) {
             resolveStartup(host.check(), images)
         }
     }

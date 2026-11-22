@@ -5,6 +5,10 @@
     <string name="permission_title">获取必要的权限</string>
     <string name="permission_failure">权限检查未通过：%1$s</string>
     <string name="permission_retry">重新请求授权</string>
+    <string name="permission_action">请求授权</string>
+    <string name="su_path_label">自定义 su 路径</string>
+    <string name="su_path_placeholder">例如 /system/xbin/su</string>
+    <string name="su_path_help">留空使用系统 su；自定义时填写可执行文件的绝对路径，不要附加命令参数。设置会自动保存。</string>
     <string name="download_step">2/3 · 下载系统</string>
     <string name="download_title">下载 Debian</string>
     <string name="download_intro">选择分支和版本，再下载对应的 ARM64 镜像。</string>

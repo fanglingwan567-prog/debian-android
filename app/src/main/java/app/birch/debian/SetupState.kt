@@ -6,7 +6,7 @@ internal sealed interface SetupState {
     sealed interface Page : SetupState
     sealed interface DownloadPage : Page
 
-    data class PermissionFailed(val error: String) : Page
+    data class Permission(val error: String? = null) : Page
     data object Checking : Page
     data class Download(
         val channel: DebianRegistry.Channel? = null,

@@ -25,7 +25,7 @@ tools/                        Termux 构建及资产准备脚本
 
 ## 打开流程
 
-1. 「1/3 · 授予权限」：自动向 root 管理器申请权限。拒绝或超时只在本页显示原因，可点「重新请求授权」。
+1. 「1/3 · 授予权限」：首次打开时，可直接在页面内填写自定义 su 可执行文件的绝对路径（不含命令参数），留空使用系统 `su`，再点「请求授权」。路径会保存，后续权限检查、系统安装和终端启动共用此设置；再次打开时自动使用已保存的路径检查权限。拒绝或超时只在本页显示原因，可修改路径并点「重新请求授权」，不弹出路径输入对话框。
 2. 「2/3 · 下载系统」：选稳定版或测试版后，通过 HTTPS 读取 Debian `Release` 的当前稳定版主版本号或测试版代号，并从 Docker Hub `library/debian` 实时筛选近期 ARM64 slim 版本（最多显示 12 个）。稳定版列出点版本，测试版列出日期快照。选择版本不会下载镜像；点击下载后，根据选定的 ARM64 manifest 摘要读取清单，显示已下载大小、总量和百分比。仅接受单层 gzip rootfs；校验字节数及 SHA-256 后，原子保存到应用私有目录。不接受自定义镜像地址。访问镜像源失败或限流可在当前页重试；中断的传输需重新下载，不做断点续传。
 3. 「3/3 · 安装系统」：完整下载后自动进入此页，确认安装时不再请求网络。重开应用可复用下载；失败可重试安装或重新选择版本。root 启动器在未挂载的临时目录再次校验镜像长度、摘要，解包并探测 Bash/dpkg 后才原子发布。安装成功后清理压缩包。
 
@@ -48,8 +48,8 @@ tools/                        Termux 构建及资产准备脚本
 
 - 镜像：Docker Official Images 的 `library/debian`，不在安装包中锁死版本号或摘要。每次选择分支重新获取目录；一次下载锁定所选清单摘要及其层摘要，不跟随可变标签。网络请求仅在普通应用进程发出，WebView 保持离线。
 - 安装引导使用 Kotlin **1.9.24**、Compose 编译器 **1.5.14**、Compose BOM **2024.06.00**（UI **1.6.8**、Material 3 **1.2.1**）。颜色取自原 `Theme.Material3.DayNight`，波浪进度使用 Compose Canvas，终端快捷键和确认框使用 Compose。Material Components **1.12.0** 提供 Activity 主题和系统动态配色。终端采用 xterm.js **6.0.0**、addon-fit **0.11.0**；上游许可证在 assets/term 中。`tools/assets.py` 在校验上游包后应用一处本地修正：清除选区时也更新 DOM 渲染器缓存，避免终端高度改变时重画已经取消的选区。Debian 软件版权信息保留在镜像 `/usr/share/doc` 中。
-- 本次工具链：SDK 34、AGP 8.4.1、Gradle 8.8、JDK 21、NDK r29 sysroot。公开测试版使用本地 Android 测试证书签名；GitHub 附件为不可调试的 Release 构建，不是商店发行签名。
-- `tools/assets.py` 只在重新获取打包输入时需要联网，只下载固定摘要的 xterm 包。源码和所需资产已就位。
+- 项目工具链：SDK 34、AGP 8.4.1、Gradle 8.8、JDK 21。0.1.34 本地构建使用 NDK r30 sysroot 和 ARM64 aapt2。GitHub 附件为不可调试的 Release 构建；0.1.34 起使用独立的 RSA 3072 发布密钥，早期公开测试版使用的是其他测试证书。
+- `tools/assets.py` 只在重新获取打包输入时需要联网，只下载固定摘要的 xterm 包，并应用上述选区修正。Android 软键盘通过原生输入连接转发已提交文本，不再从隐藏输入框计算文本差量，不自动补括号、移动光标或替换旧文字；未确认的组合输入暂存，确认后原样发送，退格和删除按输入法实际请求发送按键。显式启用的 CTRL/ALT 快捷键仍然生效。源码和所需资产已就位。
 
 仓库不提交 APK、Debian 镜像或编译好的 `libbirch.so`。首次克隆或修改 `launcher.c` 后，先从项目根目录运行：
 
@@ -79,6 +79,8 @@ ANDROID_HOME="$HOME/android-sdk" ./gradlew "-Pandroid.aapt2FromMavenOverride=$(c
 sh tools/assemble.sh :app:assembleRelease
 ```
 
-输出：`app/build/outputs/apk/release/app-release-unsigned.apk`。分发前需用自己的证书签名；本项目公开测试包继续使用此前的测试证书，以支持覆盖安装。签名密钥不入库。
+输出：`app/build/outputs/apk/release/app-release-unsigned.apk`。分发前需签名。0.1.34 起使用独立的发布密钥，证书 SHA-256：`04:53:F8:DB:B3:F5:B1:DF:90:D0:15:9D:36:69:84:2F:5D:36:A2:1F:9E:BB:E0:B7:75:20:B7:22:73:C5:A3:89`。签名私钥、密码不入库。
+
+**更换签名提示：** 0.1.34 不能直接覆盖其他证书签名的旧版 APK。卸载或清除应用数据会删除应用内 Debian 和其中的文件，请先另行备份数据，不要为安装新版本直接卸载旧版。
 
 GitHub 源码仅包含应用源码、资源、构建工具和项目文档，不包含测试程序、APK、Debian 镜像或编译好的 native 启动器。可安装的 Release APK 单独发布在 GitHub Releases。
